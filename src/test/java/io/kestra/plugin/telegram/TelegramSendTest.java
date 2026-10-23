@@ -4,6 +4,7 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.Map;
 import java.util.UUID;
 
@@ -12,12 +13,16 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import io.kestra.core.junit.annotations.KestraTest;
+import io.kestra.core.models.flows.Flow;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.property.URIFetcher;
 import io.kestra.core.models.tasks.Task;
+import io.kestra.core.models.validations.ModelValidator;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.RunContextFactory;
 import io.kestra.core.serializers.JacksonMapper;
+import io.kestra.core.serializers.YamlParser;
+import io.kestra.core.utils.IdUtils;
 
 import io.micronaut.context.ApplicationContext;
 import io.micronaut.http.HttpStatus;
@@ -27,6 +32,7 @@ import jakarta.inject.Inject;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalToObject;
+import static org.hamcrest.Matchers.is;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -45,6 +51,9 @@ class TelegramSendTest {
 
     @Inject
     private RunContextFactory runContextFactory;
+
+    @Inject
+    private ModelValidator modelValidator;
 
     @BeforeEach
     @AfterEach
@@ -516,6 +525,47 @@ class TelegramSendTest {
             exception.getMessage(),
             equalToObject("Invalid parseMode value 'MarkdownV2'. Valid values (case-sensitive): HTML, MARKDOWNV2")
         );
+    }
+
+    @SuppressWarnings("deprecation")
+    @Test
+    void flowSettingDeprecatedOptionsStillValidatesAndRuns() throws Exception {
+        // Flows written before the deprecation still set these options: they must keep parsing, validating and running.
+        var message = "deprecated-options-" + IdUtils.create();
+        var embeddedServer = applicationContext.getBean(EmbeddedServer.class);
+        embeddedServer.start();
+
+        var flow = YamlParser.parse(
+            """
+                id: telegram_deprecated_options
+                namespace: io.kestra.tests
+                tasks:
+                  - id: send
+                    type: io.kestra.plugin.telegram.TelegramSend
+                    endpointOverride: "%s"
+                    token: token
+                    channel: channel
+                    payload: "%s"
+                    options:
+                      readTimeout: PT30S
+                      connectionPoolIdleTimeout: PT10S
+                      maxContentLength: 1024
+                """.formatted(embeddedServer.getURL(), message),
+            Flow.class
+        );
+
+        assertThat(modelValidator.isValid(flow).isEmpty(), is(true));
+
+        var runContext = runContextFactory.of();
+        var task = (TelegramSend) flow.getTasks().getFirst();
+        var options = task.getOptions();
+        assertThat(runContext.render(options.getReadTimeout()).as(Duration.class).orElseThrow(), is(Duration.ofSeconds(30)));
+        assertThat(runContext.render(options.getConnectionPoolIdleTimeout()).as(Duration.class).orElseThrow(), is(Duration.ofSeconds(10)));
+        assertThat(runContext.render(options.getMaxContentLength()).as(Integer.class).orElseThrow(), is(1024));
+
+        task.run(runContext);
+
+        assertThat(FakeTelegramController.message, equalToObject(new TelegramBotApiService.TelegramMessage("channel", message, null)));
     }
 
     @Test
